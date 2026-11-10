@@ -1,0 +1,9 @@
+export { default as DashboardHome } from "../page";
+export { default as MetricsCards } from "./MetricsCards";
+export { default as DocumentsChart } from "./DocumentsChart";
+export { default as DocumentTypesChart } from "./DocumentTypesChart";
+export { default as TagsCloud } from "./TagsCloud";
+export { default as FinancialSummary } from "./FinancialSummary";
+export { default as RecentActivity } from "./RecentActivity";
+export { default as TopEntities } from "./TopEntities";
+export { default as TopItems } from "./TopItems";

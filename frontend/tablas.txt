@@ -1,0 +1,843 @@
+CREATE TABLE users (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    username VARCHAR(150) UNIQUE NOT NULL,
+    email VARCHAR(254) UNIQUE NOT NULL,
+    password_hash VARCHAR(255) NOT NULL,
+    full_name VARCHAR(255),
+    is_active BOOLEAN DEFAULT true,
+    is_admin BOOLEAN DEFAULT false,
+    profile_picture_url TEXT,
+    role VARCHAR(20) NOT NULL DEFAULT 'usuario'
+        CHECK (role IN ('administrador', 'usuario', 'soporte')),
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    last_login TIMESTAMP WITH TIME ZONE
+);
+
+CREATE TABLE jwt_tokens (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+    token_jti VARCHAR(255) UNIQUE NOT NULL,
+    token_type VARCHAR(50) CHECK (token_type IN ('access', 'refresh')),
+    expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    is_blacklisted BOOLEAN DEFAULT false
+);
+
+CREATE TABLE processing_batches (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    batch_number SERIAL UNIQUE NOT NULL,
+    user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+    document_count INTEGER DEFAULT 0 CHECK (document_count <= 10),
+    max_documents INTEGER DEFAULT 10,
+    status VARCHAR(50) DEFAULT 'incomplete' CHECK (
+        status IN ('incomplete', 'ready', 'processing', 'completed', 'failed', 'retrying')
+    ),
+    retry_count INTEGER DEFAULT 0,
+    max_retries INTEGER DEFAULT 3,
+    error_message TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    ready_at TIMESTAMP WITH TIME ZONE,
+    started_at TIMESTAMP WITH TIME ZONE,
+    completed_at TIMESTAMP WITH TIME ZONE,
+    next_retry_at TIMESTAMP WITH TIME ZONE
+);
+
+CREATE TABLE documents (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+    batch_id UUID REFERENCES processing_batches(id) ON DELETE SET NULL,
+    
+    filename VARCHAR(500) NOT NULL,
+    file_type VARCHAR(50) NOT NULL CHECK (file_type IN ('pdf', 'docx')),
+    file_size BIGINT NOT NULL,
+    file_hash VARCHAR(128) UNIQUE NOT NULL,
+    file_path TEXT,
+    
+    state VARCHAR(50) DEFAULT 'pending' CHECK (
+        state IN ('pending', 'processing', 'completed', 'failed')
+    ),
+    retry_count INTEGER DEFAULT 0,
+    upload_date TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    processed_at TIMESTAMP WITH TIME ZONE,
+    error_message TEXT,
+    
+    metadata JSONB DEFAULT '{}'::jsonb,
+    tags JSONB DEFAULT '[]'::jsonb,
+    entities JSONB DEFAULT '{}'::jsonb,
+    summary JSONB DEFAULT '{}'::jsonb,
+    items JSONB DEFAULT '[]'::jsonb,
+    extracted_text TEXT,
+    document_features JSONB DEFAULT '{}'::jsonb,
+    
+    document_type TEXT GENERATED ALWAYS AS (metadata->>'document_type') STORED,
+    
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE TABLE search_history (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID REFERENCES users(id) ON DELETE CASCADE NOT NULL,
+    search_query TEXT NOT NULL,
+    search_filters JSONB DEFAULT '{}'::jsonb,
+    found_document_count INTEGER DEFAULT 0,
+    executed_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    found_document_ids UUID[] DEFAULT ARRAY[]::UUID[],
+    result_details JSONB DEFAULT '{}'::jsonb
+);
+
+CREATE TABLE support_tickets (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+    subject VARCHAR(255) NOT NULL,
+    description TEXT NOT NULL,
+    priority VARCHAR(50) DEFAULT 'medium' CHECK (priority IN ('low', 'medium', 'high', 'critical')),
+    status VARCHAR(50) DEFAULT 'open' CHECK (status IN ('open', 'in_progress', 'resolved', 'closed')),
+    attachment_url TEXT,
+    assigned_to UUID REFERENCES users(id) ON DELETE SET NULL,
+    assigned_at TIMESTAMP WITH TIME ZONE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    resolved_at TIMESTAMP WITH TIME ZONE,
+    closed_at TIMESTAMP WITH TIME ZONE
+);
+
+CREATE TABLE ticket_responses (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    ticket_id UUID REFERENCES support_tickets(id) ON DELETE CASCADE NOT NULL,
+    user_id UUID REFERENCES users(id) ON DELETE SET NULL NOT NULL,
+    message TEXT NOT NULL,
+    is_internal_note BOOLEAN DEFAULT false,
+    attachment_url TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE TABLE processing_logs (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    batch_id UUID REFERENCES processing_batches(id) ON DELETE CASCADE,
+    document_id UUID REFERENCES documents(id) ON DELETE CASCADE,
+    log_level VARCHAR(50) CHECK (log_level IN ('debug', 'info', 'warning', 'error')),
+    message TEXT NOT NULL,
+    details JSONB,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE INDEX idx_documents_metadata_gin ON documents USING GIN (metadata);
+CREATE INDEX idx_documents_tags_gin ON documents USING GIN (tags);
+CREATE INDEX idx_documents_entities_gin ON documents USING GIN (entities);
+CREATE INDEX idx_documents_items_gin ON documents USING GIN (items);
+CREATE INDEX idx_search_history_filters_gin ON search_history USING GIN (search_filters);
+CREATE INDEX idx_documents_ruc ON documents ((metadata->>'ruc'));
+CREATE INDEX idx_documents_invoice_number ON documents ((metadata->>'invoice_number'));
+CREATE INDEX idx_documents_date ON documents ((metadata->>'date'));
+CREATE INDEX idx_documents_total_amount ON documents ((metadata->>'total_amount'));
+CREATE INDEX idx_documents_type ON documents (document_type);
+CREATE INDEX idx_documents_text_search ON documents USING GIN (to_tsvector('spanish', COALESCE(extracted_text, '')));
+CREATE INDEX idx_documents_batch_id ON documents(batch_id);
+CREATE INDEX idx_documents_state ON documents(state);
+CREATE INDEX idx_documents_user_id ON documents(user_id);
+CREATE INDEX idx_documents_hash ON documents(file_hash);
+CREATE INDEX idx_documents_upload_date ON documents(upload_date DESC);
+CREATE INDEX idx_documents_retry_count ON documents(retry_count);
+CREATE INDEX idx_batches_status ON processing_batches(status);
+CREATE INDEX idx_batches_user_id ON processing_batches(user_id);
+CREATE INDEX idx_batches_next_retry ON processing_batches(next_retry_at) WHERE status = 'retrying';
+CREATE INDEX idx_batches_ready ON processing_batches(status, document_count) WHERE status IN ('incomplete', 'ready');
+CREATE INDEX idx_search_history_user_id ON search_history(user_id);
+CREATE INDEX idx_search_history_executed_at ON search_history(executed_at DESC);
+CREATE INDEX idx_support_tickets_user_id ON support_tickets(user_id);
+CREATE INDEX idx_support_tickets_status ON support_tickets(status);
+CREATE INDEX idx_support_tickets_priority ON support_tickets(priority);
+CREATE INDEX idx_support_tickets_assigned_to ON support_tickets(assigned_to);
+CREATE INDEX idx_support_tickets_created_at ON support_tickets(created_at DESC);
+CREATE INDEX idx_ticket_responses_ticket_id ON ticket_responses(ticket_id);
+CREATE INDEX idx_ticket_responses_user_id ON ticket_responses(user_id);
+CREATE INDEX idx_ticket_responses_created_at ON ticket_responses(created_at DESC);
+CREATE INDEX idx_users_role ON users(role);
+CREATE INDEX idx_users_is_active ON users(is_active);
+CREATE INDEX idx_users_role_active ON users(role, is_active);
+
+CREATE OR REPLACE VIEW documents_full AS
+SELECT 
+    d.id,
+    d.user_id,
+    u.username,
+    u.email,
+    d.batch_id,
+    pb.batch_number,
+    pb.status as batch_status,
+    d.filename,
+    d.file_type,
+    d.file_size,
+    d.file_hash,
+    d.file_path,
+    d.state,
+    d.retry_count,
+    d.upload_date,
+    d.processed_at,
+    d.error_message,
+    d.metadata,
+    d.tags,
+    d.entities,
+    d.summary,
+    d.items,
+    d.document_type,
+    d.extracted_text,
+    (d.metadata->>'total_amount')::numeric as total_amount,
+    d.metadata->>'currency' as currency,
+    (d.summary->>'page_count')::integer as page_count,
+    (d.summary->>'word_count')::integer as word_count,
+    d.summary->>'language' as language
+FROM documents d
+LEFT JOIN users u ON d.user_id = u.id
+LEFT JOIN processing_batches pb ON d.batch_id = pb.id;
+
+CREATE OR REPLACE VIEW batch_status_view AS
+SELECT 
+    pb.id as batch_id,
+    pb.batch_number,
+    pb.status,
+    pb.document_count,
+    pb.max_documents,
+    pb.retry_count,
+    pb.max_retries,
+    pb.created_at,
+    pb.started_at,
+    pb.completed_at,
+    pb.next_retry_at,
+    pb.error_message,
+    u.username as created_by,
+    COUNT(d.id) as actual_document_count,
+    ARRAY_AGG(d.filename ORDER BY d.upload_date) FILTER (WHERE d.filename IS NOT NULL) as documents,
+    ARRAY_AGG(d.state ORDER BY d.upload_date) FILTER (WHERE d.state IS NOT NULL) as document_states
+FROM processing_batches pb
+LEFT JOIN users u ON pb.user_id = u.id
+LEFT JOIN documents d ON pb.id = d.batch_id
+GROUP BY pb.id, pb.batch_number, pb.status, pb.document_count, pb.max_documents,
+         pb.retry_count, pb.max_retries, pb.created_at, pb.started_at, 
+         pb.completed_at, pb.next_retry_at, pb.error_message, u.username;
+
+CREATE OR REPLACE VIEW tickets_with_details AS
+SELECT 
+    t.id,
+    t.user_id,
+    u.username as creator_username,
+    u.email as creator_email,
+    u.full_name as creator_name,
+    t.subject,
+    t.description,
+    t.priority,
+    t.status,
+    t.attachment_url,
+    t.assigned_to,
+    a.username as assigned_username,
+    a.email as assigned_email,
+    a.full_name as assigned_name,
+    t.assigned_at,
+    t.created_at,
+    t.updated_at,
+    t.resolved_at,
+    t.closed_at,
+    (SELECT COUNT(*) FROM ticket_responses WHERE ticket_id = t.id) as response_count,
+    (SELECT created_at FROM ticket_responses WHERE ticket_id = t.id ORDER BY created_at DESC LIMIT 1) as last_response_at
+FROM support_tickets t
+LEFT JOIN users u ON t.user_id = u.id
+LEFT JOIN users a ON t.assigned_to = a.id;
+
+CREATE OR REPLACE VIEW items_statistics AS
+SELECT 
+    d.id as document_id,
+    d.filename,
+    d.file_type,
+    d.upload_date,
+    d.document_type,
+    jsonb_array_length(COALESCE(d.items, '[]'::jsonb)) as total_items,
+    (d.metadata->>'total_amount')::numeric as total_amount,
+    d.metadata->>'currency' as currency
+FROM documents d
+WHERE d.items IS NOT NULL AND jsonb_array_length(d.items) > 0;
+
+CREATE OR REPLACE VIEW top_items AS
+SELECT 
+    item->>'name' as item_name,
+    item->>'type' as item_type,
+    COUNT(*) as frequency,
+    AVG((item->>'unit_price')::numeric) as avg_unit_price,
+    AVG((item->>'total_price')::numeric) as avg_total_price,
+    item->>'currency' as currency
+FROM documents d,
+      jsonb_array_elements(d.items) as item
+WHERE d.items IS NOT NULL
+GROUP BY item->>'name', item->>'type', item->>'currency'
+ORDER BY frequency DESC;
+
+CREATE OR REPLACE VIEW processing_status_view AS
+SELECT 
+    pb.id as batch_id,
+    pb.batch_number,
+    pb.status,
+    pb.document_count,
+    pb.retry_count,
+    pb.max_retries,
+    pb.created_at,
+    pb.ready_at,
+    pb.started_at,
+    pb.completed_at,
+    pb.next_retry_at,
+    COUNT(d.id) FILTER (WHERE d.state = 'pending') as pending_docs,
+    COUNT(d.id) FILTER (WHERE d.state = 'processing') as processing_docs,
+    COUNT(d.id) FILTER (WHERE d.state = 'completed') as completed_docs,
+    COUNT(d.id) FILTER (WHERE d.state = 'failed') as failed_docs,
+    (pb.status = 'ready' OR (pb.status = 'retrying' AND pb.next_retry_at <= NOW())) as can_process_now
+FROM processing_batches pb
+LEFT JOIN documents d ON pb.id = d.batch_id
+GROUP BY pb.id, pb.batch_number, pb.status, pb.document_count, pb.retry_count,
+         pb.max_retries, pb.created_at, pb.ready_at, pb.started_at, pb.completed_at, pb.next_retry_at;
+
+CREATE OR REPLACE VIEW documents_with_delete_info AS
+SELECT 
+    d.id,
+    d.user_id,
+    d.batch_id,
+    d.filename,
+    d.file_type,
+    d.file_size,
+    d.file_path,
+    d.state,
+    d.upload_date,
+    d.processed_at,
+    pb.status as batch_status,
+    pb.document_count as batch_doc_count,
+    (d.state NOT IN ('processing')) as can_delete,
+    (pb.status IS NULL OR pb.status NOT IN ('processing')) as batch_allows_delete,
+    (d.file_path IS NOT NULL) as has_storage_file,
+    d.document_type,
+    d.metadata->>'total_amount' as total_amount,
+    d.metadata->>'currency' as currency
+FROM documents d
+LEFT JOIN processing_batches pb ON d.batch_id = pb.id;
+
+CREATE OR REPLACE VIEW admin_user_statistics AS
+SELECT 
+    role,
+    COUNT(*) as total_users,
+    COUNT(*) FILTER (WHERE is_active = true) as active_users,
+    COUNT(*) FILTER (WHERE is_active = false) as inactive_users,
+    COUNT(*) FILTER (WHERE last_login > NOW() - INTERVAL '30 days') as active_last_month
+FROM users
+GROUP BY role;
+
+CREATE OR REPLACE FUNCTION get_or_create_batch(p_user_id UUID)
+RETURNS UUID AS $$
+DECLARE
+    v_batch_id UUID;
+BEGIN
+    SELECT id INTO v_batch_id
+    FROM processing_batches
+    WHERE status = 'incomplete'
+      AND document_count < max_documents
+      AND user_id = p_user_id
+    ORDER BY created_at DESC
+    LIMIT 1;
+
+    IF v_batch_id IS NULL THEN
+        INSERT INTO processing_batches (user_id, status, document_count, max_documents)
+        VALUES (p_user_id, 'incomplete', 0, 10)
+        RETURNING id INTO v_batch_id;
+    END IF;
+
+    RETURN v_batch_id;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+CREATE OR REPLACE FUNCTION increment_batch_count(p_batch_id UUID)
+RETURNS VOID AS $$
+DECLARE
+    v_count INTEGER;
+    v_max INTEGER;
+BEGIN
+    SELECT document_count, max_documents INTO v_count, v_max
+    FROM processing_batches WHERE id = p_batch_id;
+
+    IF v_count < v_max THEN
+        UPDATE processing_batches
+        SET document_count = document_count + 1, updated_at = NOW()
+        WHERE id = p_batch_id;
+
+        IF v_count + 1 >= v_max THEN
+            UPDATE processing_batches
+            SET status = 'ready', ready_at = NOW(), updated_at = NOW()
+            WHERE id = p_batch_id;
+        END IF;
+    END IF;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+CREATE OR REPLACE FUNCTION decrement_batch_count(p_batch_id UUID)
+RETURNS VOID AS $$
+DECLARE
+    v_count INTEGER;
+BEGIN
+    SELECT document_count INTO v_count
+    FROM processing_batches WHERE id = p_batch_id;
+    
+    IF v_count > 0 THEN
+        UPDATE processing_batches
+        SET document_count = document_count - 1,
+            updated_at = NOW()
+        WHERE id = p_batch_id;
+        
+        IF v_count >= 10 THEN
+            UPDATE processing_batches
+            SET status = 'incomplete',
+                ready_at = NULL,
+                updated_at = NOW()
+            WHERE id = p_batch_id
+              AND status = 'ready'
+              AND document_count < max_documents;
+        END IF;
+    END IF;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+CREATE OR REPLACE FUNCTION cleanup_empty_batches()
+RETURNS INTEGER AS $$
+DECLARE
+    deleted_count INTEGER;
+BEGIN
+    DELETE FROM processing_batches
+    WHERE document_count = 0
+      AND status NOT IN ('processing')
+      AND created_at < NOW() - INTERVAL '1 hour';
+    
+    GET DIAGNOSTICS deleted_count = ROW_COUNT;
+    RETURN deleted_count;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+CREATE OR REPLACE FUNCTION mark_batch_failed(p_batch_id UUID, p_error_message TEXT)
+RETURNS VOID AS $$
+DECLARE
+    v_retry_count INTEGER;
+    v_max_retries INTEGER;
+    v_failed_docs INTEGER;
+BEGIN
+    SELECT retry_count, max_retries INTO v_retry_count, v_max_retries
+    FROM processing_batches WHERE id = p_batch_id;
+
+    SELECT COUNT(*) INTO v_failed_docs
+    FROM documents WHERE batch_id = p_batch_id AND state = 'failed';
+
+    IF v_failed_docs > 0 AND v_retry_count < v_max_retries THEN
+        UPDATE processing_batches
+        SET status = 'retrying',
+            retry_count = retry_count + 1,
+            next_retry_at = NOW() + INTERVAL '1 minute',
+            error_message = p_error_message,
+            updated_at = NOW()
+        WHERE id = p_batch_id;
+
+        UPDATE documents
+        SET state = 'pending', retry_count = retry_count + 1, updated_at = NOW(), error_message = NULL
+        WHERE batch_id = p_batch_id AND state = 'failed';
+    ELSE
+        UPDATE processing_batches
+        SET status = 'completed',
+            completed_at = NOW(),
+            updated_at = NOW(),
+            error_message = CASE WHEN v_failed_docs > 0
+                                 THEN format('%s documentos fallaron después de %s intentos', v_failed_docs, v_max_retries)
+                                 ELSE NULL END
+        WHERE id = p_batch_id;
+    END IF;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+CREATE OR REPLACE FUNCTION get_next_batch_to_process()
+RETURNS UUID AS $$
+DECLARE
+    v_batch_id UUID;
+BEGIN
+    SELECT id INTO v_batch_id
+    FROM processing_batches
+    WHERE ((status = 'retrying' AND next_retry_at <= NOW() AND retry_count < max_retries)
+        OR status = 'ready')
+    ORDER BY created_at ASC
+    LIMIT 1;
+
+    IF v_batch_id IS NOT NULL THEN
+        UPDATE processing_batches
+        SET status = 'processing', started_at = NOW(), updated_at = NOW()
+        WHERE id = v_batch_id;
+    END IF;
+
+    RETURN v_batch_id;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+CREATE OR REPLACE FUNCTION mark_batch_completed(p_batch_id UUID)
+RETURNS VOID AS $$
+DECLARE
+    v_failed_count INTEGER;
+    v_total_count INTEGER;
+BEGIN
+    SELECT COUNT(*) FILTER (WHERE state = 'failed'),
+            COUNT(*) INTO v_failed_count, v_total_count
+    FROM documents WHERE batch_id = p_batch_id;
+
+    IF v_failed_count > 0 THEN
+        PERFORM mark_batch_failed(p_batch_id, format('%s de %s documentos fallaron en el último intento.', v_failed_count, v_total_count));
+    ELSE
+        UPDATE processing_batches
+        SET status = 'completed',
+            completed_at = NOW(),
+            updated_at = NOW(),
+            error_message = NULL
+        WHERE id = p_batch_id;
+    END IF;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+CREATE OR REPLACE FUNCTION get_batch_document_status(p_batch_id UUID)
+RETURNS TABLE (
+    document_id UUID,
+    filename VARCHAR(500),
+    state VARCHAR(50),
+    attempt_count INTEGER,
+    error_message TEXT,
+    last_updated TIMESTAMPTZ
+) AS $$
+BEGIN
+    RETURN QUERY
+    SELECT d.id, d.filename, d.state,
+            d.retry_count,
+            d.error_message, d.updated_at
+    FROM documents d
+    WHERE d.batch_id = p_batch_id;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+CREATE OR REPLACE FUNCTION debug_batch_status()
+RETURNS TABLE (
+    batch_id UUID,
+    status VARCHAR(50),
+    total_docs INTEGER,
+    pending_docs INTEGER,
+    completed_docs INTEGER,
+    failed_docs INTEGER,
+    retry_count INTEGER,
+    max_retries INTEGER,
+    next_retry_at TIMESTAMPTZ,
+    can_process_now BOOLEAN
+) AS $$
+BEGIN
+    RETURN QUERY
+    SELECT pb.id, pb.status, pb.document_count,
+        (SELECT COUNT(*) FROM documents WHERE batch_id = pb.id AND state = 'pending'),
+        (SELECT COUNT(*) FROM documents WHERE batch_id = pb.id AND state = 'completed'),
+        (SELECT COUNT(*) FROM documents WHERE batch_id = pb.id AND state = 'failed'),
+        pb.retry_count, pb.max_retries, pb.next_retry_at,
+        (pb.status = 'ready' OR (pb.status = 'retrying' AND pb.next_retry_at <= NOW()))
+    FROM processing_batches pb;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+CREATE OR REPLACE FUNCTION force_batch_ready(p_batch_id UUID)
+RETURNS VOID AS $$
+BEGIN
+    UPDATE processing_batches
+    SET status = 'ready',
+        ready_at = NOW(),
+        updated_at = NOW()
+    WHERE id = p_batch_id
+      AND status <> 'ready';
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+CREATE OR REPLACE FUNCTION mark_old_batches_ready(minutes_old INTEGER DEFAULT 5)
+RETURNS INTEGER AS $$
+DECLARE
+    updated_count INTEGER;
+BEGIN
+    UPDATE processing_batches
+    SET status = 'ready',
+        ready_at = NOW(),
+        updated_at = NOW()
+    WHERE status = 'incomplete'
+      AND created_at < NOW() - (minutes_old || ' minutes')::INTERVAL;
+
+    GET DIAGNOSTICS updated_count = ROW_COUNT;
+
+    UPDATE processing_batches
+    SET status = 'ready',
+        ready_at = NOW(),
+        updated_at = NOW()
+    WHERE status = 'retrying'
+      AND next_retry_at <= NOW()
+      AND retry_count < max_retries;
+
+    RETURN updated_count;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+CREATE OR REPLACE FUNCTION is_current_user_admin()
+RETURNS BOOLEAN AS $$
+BEGIN
+    RETURN (current_setting('request.jwt.claim.role', true) = 'administrador');
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+CREATE OR REPLACE FUNCTION admin_list_users(
+    p_role TEXT DEFAULT NULL,
+    p_is_active BOOLEAN DEFAULT NULL,
+    p_limit INTEGER DEFAULT 50,
+    p_offset INTEGER DEFAULT 0
+)
+RETURNS TABLE (
+    id UUID,
+    username VARCHAR(150),
+    email VARCHAR(254),
+    full_name VARCHAR(255),
+    role VARCHAR(20),
+    is_active BOOLEAN,
+    created_at TIMESTAMPTZ,
+    last_login TIMESTAMPTZ
+) AS $$
+BEGIN
+    IF NOT is_current_user_admin() THEN
+        RAISE EXCEPTION 'Solo administradores pueden listar usuarios';
+    END IF;
+    
+    RETURN QUERY
+    SELECT u.id, u.username, u.email, u.full_name, u.role, u.is_active, u.created_at, u.last_login
+    FROM users u
+    WHERE (p_role IS NULL OR u.role = p_role)
+      AND (p_is_active IS NULL OR u.is_active = p_is_active)
+    ORDER BY u.created_at DESC
+    LIMIT p_limit OFFSET p_offset;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+CREATE OR REPLACE FUNCTION admin_toggle_user_status(p_user_id UUID)
+RETURNS BOOLEAN AS $$
+DECLARE
+    v_new_status BOOLEAN;
+BEGIN
+    IF NOT is_current_user_admin() THEN
+        RAISE EXCEPTION 'Solo administradores pueden cambiar el estado de usuarios';
+    END IF;
+    
+    UPDATE users
+    SET is_active = NOT is_active,
+        updated_at = NOW()
+    WHERE id = p_user_id
+    RETURNING is_active INTO v_new_status;
+    
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Usuario no encontrado';
+    END IF;
+    
+    RETURN v_new_status;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+CREATE OR REPLACE FUNCTION admin_delete_user(p_user_id UUID)
+RETURNS BOOLEAN AS $$
+DECLARE
+    v_user_role TEXT;
+BEGIN
+    IF NOT is_current_user_admin() THEN
+        RAISE EXCEPTION 'Solo administradores pueden eliminar usuarios';
+    END IF;
+    
+    SELECT role INTO v_user_role FROM users WHERE id = p_user_id;
+    
+    IF v_user_role = 'administrador' THEN
+        RAISE EXCEPTION 'No se puede eliminar a otro administrador desde la API';
+    END IF;
+    
+    DELETE FROM users WHERE id = p_user_id;
+    
+    RETURN FOUND;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+CREATE OR REPLACE FUNCTION admin_update_user(
+    p_user_id UUID,
+    p_username VARCHAR DEFAULT NULL,
+    p_email VARCHAR DEFAULT NULL,
+    p_full_name VARCHAR DEFAULT NULL,
+    p_role VARCHAR DEFAULT NULL,
+    p_is_active BOOLEAN DEFAULT NULL
+)
+RETURNS BOOLEAN AS $$
+DECLARE
+    v_current_role TEXT;
+BEGIN
+    IF NOT is_current_user_admin() THEN
+        RAISE EXCEPTION 'Solo administradores pueden editar usuarios';
+    END IF;
+    
+    SELECT role INTO v_current_role FROM users WHERE id = p_user_id;
+    
+    IF v_current_role = 'administrador' AND p_role IS NOT NULL AND p_role != 'administrador' THEN
+        RAISE EXCEPTION 'No se puede cambiar el rol de un administrador desde la API';
+    END IF;
+    
+    IF p_role = 'administrador' THEN
+        RAISE EXCEPTION 'No se puede asignar rol de administrador desde la API';
+    END IF;
+    
+    UPDATE users
+    SET username = COALESCE(p_username, username),
+        email = COALESCE(p_email, email),
+        full_name = COALESCE(p_full_name, full_name),
+        role = COALESCE(p_role, role),
+        is_active = COALESCE(p_is_active, is_active),
+        updated_at = NOW()
+    WHERE id = p_user_id;
+    
+    RETURN FOUND;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+CREATE OR REPLACE FUNCTION auto_mark_batch_ready()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF NEW.document_count >= NEW.max_documents AND NEW.status = 'incomplete' THEN
+        NEW.status := 'ready';
+        NEW.ready_at := NOW();
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trigger_auto_mark_batch_ready
+    BEFORE UPDATE OF document_count
+    ON processing_batches
+    FOR EACH ROW
+    EXECUTE FUNCTION auto_mark_batch_ready();
+
+CREATE OR REPLACE FUNCTION block_admin_creation()
+RETURNS TRIGGER AS $$
+DECLARE
+    v_current_role TEXT;
+    v_has_jwt BOOLEAN;
+BEGIN
+    v_current_role := current_setting('request.jwt.claim.role', true);
+    v_has_jwt := (v_current_role IS NOT NULL);
+    
+    IF v_has_jwt THEN
+        IF NEW.role = 'administrador' THEN
+            RAISE EXCEPTION 'No puedes crear ni modificar usuarios administrador desde la API. Usa la base de datos directamente.';
+        END IF;
+        
+        IF NEW.role = 'soporte' AND v_current_role != 'administrador' THEN
+            RAISE EXCEPTION 'Solo un administrador puede crear o modificar usuarios con rol soporte.';
+        END IF;
+        
+        IF TG_OP = 'UPDATE' AND OLD.is_active != NEW.is_active AND v_current_role != 'administrador' THEN
+            RAISE EXCEPTION 'Solo un administrador puede habilitar o deshabilitar usuarios.';
+        END IF;
+        
+        IF TG_OP = 'UPDATE' AND OLD.role != NEW.role AND v_current_role != 'administrador' THEN
+            RAISE EXCEPTION 'Solo un administrador puede cambiar roles de usuario.';
+        END IF;
+    END IF;
+    
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trigger_block_admin_creation
+    BEFORE INSERT OR UPDATE ON users
+    FOR EACH ROW
+    EXECUTE FUNCTION block_admin_creation();
+
+CREATE OR REPLACE FUNCTION prevent_unauthorized_user_deletion()
+RETURNS TRIGGER AS $$
+DECLARE
+    v_current_role TEXT;
+    v_jwt_sub TEXT;
+BEGIN
+    -- Obtener el rol del JWT si existe
+    v_current_role := current_setting('request.jwt.claim.role', true);
+    -- Obtener el 'sub' (subject) del JWT para verificar si viene de un cliente
+    v_jwt_sub := current_setting('request.jwt.claim.sub', true);
+    
+    -- Si hay un JWT con contexto de cliente (tiene 'sub'), validar que sea administrador
+    IF v_jwt_sub IS NOT NULL THEN
+        IF v_current_role IS NULL OR v_current_role != 'administrador' THEN
+            RAISE EXCEPTION 'Solo un administrador puede eliminar usuarios';
+        END IF;
+    END IF;
+    
+    -- Evitar eliminar otros administradores desde la API
+    IF OLD.role = 'administrador' THEN
+        RAISE EXCEPTION 'No se puede eliminar a otro administrador desde la API';
+    END IF;
+    
+    RETURN OLD;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trigger_prevent_unauthorized_deletion
+    BEFORE DELETE ON users
+    FOR EACH ROW
+    EXECUTE FUNCTION prevent_unauthorized_user_deletion();
+
+CREATE OR REPLACE FUNCTION auto_cleanup_batch_on_delete()
+RETURNS TRIGGER AS $$
+DECLARE
+    v_doc_count INTEGER;
+BEGIN
+    IF OLD.batch_id IS NOT NULL THEN
+        SELECT COUNT(*) INTO v_doc_count
+        FROM documents
+        WHERE batch_id = OLD.batch_id;
+        
+        IF v_doc_count = 0 THEN
+            DELETE FROM processing_batches
+            WHERE id = OLD.batch_id
+              AND status NOT IN ('processing', 'completed');
+        END IF;
+    END IF;
+    
+    RETURN OLD;
+END; $$ LANGUAGE
+plpgsql;
+
+CREATE TRIGGER trigger_auto_cleanup_batch
+    AFTER DELETE ON documents
+    FOR EACH ROW
+    EXECUTE FUNCTION auto_cleanup_batch_on_delete();
+
+CREATE OR REPLACE FUNCTION update_ticket_timestamp()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated_at = NOW();
+    RETURN NEW;
+END; $$ LANGUAGE
+plpgsql;
+
+CREATE TRIGGER trigger_update_ticket_timestamp
+    BEFORE UPDATE ON support_tickets
+    FOR EACH ROW
+    EXECUTE FUNCTION update_ticket_timestamp();
+
+CREATE OR REPLACE FUNCTION update_ticket_on_response()
+RETURNS TRIGGER AS $$
+BEGIN
+    UPDATE support_tickets
+    SET updated_at = NOW()
+    WHERE id = NEW.ticket_id;
+    RETURN NEW;
+END; $$ LANGUAGE
+plpgsql;
+
+CREATE TRIGGER trigger_update_ticket_on_response
+    AFTER INSERT ON ticket_responses
+    FOR EACH ROW
+    EXECUTE FUNCTION update_ticket_on_response();

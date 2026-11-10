@@ -1,0 +1,87 @@
+# ---------------------------------------------------------
+# GLOBAL
+# ---------------------------------------------------------
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Env files (ANY folder)
+*.env
+.env
+.env.local
+.env.*.local
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+pip-log.txt
+pip-delete-this-directory.txt
+
+# ---------------------------------------------------------
+# FRONTEND (Next.js)
+# ---------------------------------------------------------
+
+# Build output
+/frontend/.next/
+frontend/.next/
+.next/
+
+# Static export
+/frontend/out/
+frontend/out/
+out/
+
+# Dist (TS compiler)
+frontend/dist/
+dist/
+
+# Node modules
+/frontend/node_modules/
+frontend/node_modules/
+node_modules/
+
+# ---------------------------------------------------------
+# BACKEND (Django)
+# ---------------------------------------------------------
+
+# Python cache
+/backend/**/*.pyc
+backend/**/*.pyc
+__pycache__/
+**/__pycache__/
+
+# Virtual env
+/backend/env/
+backend/env/
+env/
+venv/
+venv*/
+ENV*/
+env*/
+
+# Django collected static files
+/backend/staticfiles/
+backend/staticfiles/
+
+# Media (optional – si lo manejas en cloud)
+# /backend/media/
+
+# SQLite DB (si no quieres subirla)
+# backend/db.sqlite3
+
+# ---------------------------------------------------------
+# IDE / EDITOR FILES
+# ---------------------------------------------------------
+
+# VSCode
+.vscode/
+
+# PyCharm
+.idea/
+
+# Others
+*.swp
+*.swo
